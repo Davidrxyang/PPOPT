@@ -1,0 +1,10 @@
+PPOPT_LR = 3e-4
+PPO_BASELINE_LR = 3e-4
+DYNA_DDPG_LR = 3e-4
+PPO_PT_LR = 3e-4
+
+EPISODES = 200
+PT_EPISODES = 300
+
+ENV = "Hopper-v5"
+PT_ENV = "InvertedPendulum-v5"
