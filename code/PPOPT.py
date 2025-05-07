@@ -22,6 +22,7 @@ plt.ion()
 # hyperparameters 
 GAMMA = 0.99
 LR_POLICY = PPOPT_LR
+LR_PRETRAINED = 1e-4
 LR_VALUE = 3e-4
 POLICY_HIDDEN_LAYER_SIZE = 128
 VALUE_HIDDEN_LAYER_SIZE = 128
@@ -86,21 +87,13 @@ class AdaptedPolicyNetwork(nn.Module):
     def __init__(self, new_state_dim, new_action_dim, old_state_dim, old_action_dim, HIDDEN_LAYER_SIZE, pretrained_path=None):
         super().__init__()
 
-        # Adapter layers to map dimensions
-        
-        # nonlinear transformations in input adapter for more detail
         self.input_adapter = nn.Sequential(
-            nn.Linear(new_state_dim, old_state_dim),
-            #nn.ReLU(),
-            #nn.Linear(old_state_dim, old_state_dim)
+            nn.Linear(new_state_dim, old_state_dim)
         )
-            
+
         self.output_adapter_mean = nn.Linear(old_action_dim, new_action_dim)
         self.output_adapter_std = nn.Linear(old_action_dim, new_action_dim)
 
-        # Extra layers *before* and *after* pretrained network
-        
-        
         self.pre_input_layer = nn.Sequential(
             nn.Linear(old_state_dim, old_state_dim),
             nn.ReLU()
@@ -111,12 +104,22 @@ class AdaptedPolicyNetwork(nn.Module):
             nn.ReLU()
         )
 
-        # Load pretrained policy
         self.pretrained = PolicyNetwork(old_state_dim, old_action_dim, HIDDEN_LAYER_SIZE)
         if pretrained_path:
             self.pretrained.load_state_dict(torch.load(pretrained_path))
         self.pretrained.eval()
-        # self.pretrained.requires_grad_(False)  # optionally freeze pretrained core
+
+        # Optionally allow gradients
+        self.pretrained.requires_grad_(True)
+
+    def get_param_groups(self):
+        pretrained_params = list(self.pretrained.parameters())
+        adapter_params = list(self.input_adapter.parameters()) + \
+                         list(self.output_adapter_mean.parameters()) + \
+                         list(self.output_adapter_std.parameters()) + \
+                         list(self.pre_input_layer.parameters()) + \
+                         list(self.post_output_layer.parameters())
+        return adapter_params, pretrained_params
 
     def forward(self, state):
         x = self.input_adapter(state)
@@ -144,6 +147,7 @@ class AdaptedPolicyNetwork(nn.Module):
         action = dist.sample()
         log_prob = dist.log_prob(action).sum(dim=1)
         return action.squeeze(0).detach().numpy(), log_prob.squeeze(0)
+
 
 # define the value network to serve as the baseline 
 class ValueNetwork(nn.Module):
@@ -219,7 +223,7 @@ def plot_rewards(rewards, show_result=False):
     
 # now we are ready, initialize policy, value network, and optimizers for both 
 
-# adapted policy network
+# we will use different optimizers with different learning rates for the pretrained core 
 policy = AdaptedPolicyNetwork(
     new_state_dim=state_dim,
     new_action_dim=action_dim,
@@ -228,12 +232,18 @@ policy = AdaptedPolicyNetwork(
     HIDDEN_LAYER_SIZE=POLICY_HIDDEN_LAYER_SIZE,
     pretrained_path='PPOPT_PT-NET.pth'
 )
-policy_optimizer = optim.Adam(policy.parameters(), lr=LR_POLICY)
-policy_scheduler = optim.lr_scheduler.StepLR(policy_optimizer, step_size=STEP_SIZE, gamma=GAMMA_LR)
+
+adapter_params, pretrained_params = policy.get_param_groups()
+
+policy_optimizer_adapters = optim.Adam(adapter_params, lr=LR_POLICY)
+policy_optimizer_pretrained = optim.Adam(pretrained_params, lr=LR_PRETRAINED)
+
+policy_scheduler_adapters = optim.lr_scheduler.StepLR(policy_optimizer_adapters, step_size=STEP_SIZE, gamma=GAMMA_LR)
+policy_scheduler_pretrained = optim.lr_scheduler.StepLR(policy_optimizer_pretrained, step_size=STEP_SIZE, gamma=GAMMA_LR)
 
 value_network = ValueNetwork(state_dim, VALUE_HIDDEN_LAYER_SIZE)
 value_optimizer = optim.Adam(value_network.parameters(), lr=LR_VALUE)
-value_scheduler = optim.lr_scheduler.StepLR(policy_optimizer, step_size=STEP_SIZE, gamma=GAMMA_LR)
+value_scheduler = optim.lr_scheduler.StepLR(value_optimizer, step_size=STEP_SIZE, gamma=GAMMA_LR)
 
 # for plotting 
 rewards_per_episode = []
@@ -310,9 +320,13 @@ for episode in range(EPISODES):
             policy_loss = -torch.min(surr1, surr2).mean()
 
             # update policy network
-            policy_optimizer.zero_grad()
+            # update policy network
+            policy_optimizer_adapters.zero_grad()
+            policy_optimizer_pretrained.zero_grad()
             policy_loss.backward()
-            policy_optimizer.step()
+            policy_optimizer_adapters.step()
+            policy_optimizer_pretrained.step()
+
 
             # compute value loss
             value_loss = nn.functional.mse_loss(value_network(sampled_states), sampled_returns.unsqueeze(1))
@@ -323,7 +337,8 @@ for episode in range(EPISODES):
             value_optimizer.step()
     
     # step the learning rate scheduler 
-    policy_scheduler.step()
+    policy_scheduler_adapters.step()
+    policy_scheduler_pretrained.step()
     value_scheduler.step()
     
     # plot
